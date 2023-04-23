@@ -23,9 +23,9 @@ class MAC(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        intermediate_result = Signal(Shape(self.acc_bits * 2, signed=self.signed))
-        acc_min = -(1 << (self.acc_bits - 1))
-        acc_max = (1 << (self.acc_bits - 1)) - 1
+        multi = Signal(Shape(self.acc_bits, signed=self.signed))
+        nxt = Signal(Shape(self.acc_bits, signed=self.signed))
+
         with m.If(self.in_rst):
             m.d.sync += [
                 self.out_d.eq(0),
@@ -35,20 +35,18 @@ class MAC(Elaboratable):
         with m.Else():
             with m.If(self.in_a_valid & self.in_b_valid):
                 m.d.comb += [
-                    intermediate_result.eq(self.in_a * self.in_b + self.out_d),
-
+                    multi.eq(self.in_a * self.in_b),
+                    nxt.eq(multi + self.out_d),
                 ]
                 m.d.sync += [
-                    self.out_d.eq(intermediate_result),
+                    self.out_d.eq(nxt),
                     self.out_d_valid.eq(1),
                 ]
 
-                with m.If((intermediate_result < acc_min) | (intermediate_result > acc_max)):
+                with m.If(((self.out_d > 0) & (multi > 0) & (nxt < 0)) | ((self.out_d < 0) & (multi < 0) & (nxt > 0))):
                     m.d.sync += [
                         self.out_ovf.eq(1),
                     ]
-                
-
         return m
 
 
