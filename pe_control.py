@@ -213,6 +213,7 @@ class PEControl(Elaboratable):
                     pipe_b.w_en.eq(0),
                     pipe_a.r_en.eq(0),
                     pipe_b.r_en.eq(0),
+                    self.reuse_b.eq(0)
                 ]
 
                 with m.If(self.out_r_addr == self.next_pc):
