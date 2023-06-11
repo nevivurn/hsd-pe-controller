@@ -289,6 +289,8 @@ class PEControl(Elaboratable):
                     self.lb_b_w_en.eq(0),
                     self.lb_a_r_en.eq(0),
                     self.lb_b_r_en.eq(0),
+
+                    self.reuse_b.eq(0),
                 ]
                 with m.If(self.addr_io == self.next_pc):
                     m.d.sync += Cat(self.next_pc, self.next_pc_ovf).eq(self.next_pc+1),
