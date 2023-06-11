@@ -12,7 +12,7 @@ except ModuleNotFoundError:
     import lightning_fabric as L
 from torchmetrics.classification import Accuracy
 
-
+import multiprocessing
 import sys
 sys.setrecursionlimit(10000)
 
@@ -331,27 +331,29 @@ def run_sim_unit(memory, res_addr, tile):
     print("running simulation...")
     sim.run()
     print("simulation completed")
-    return result
+    return result, num_cycles
 
 
 def run_sim(memories, res_addrs, res_ids, tile, results):
+    global num_cycles
+
     assert len(memories) == len(res_addrs)
     assert len(res_addrs) == len(res_ids)
     num_mem = len(memories)
     print(f"{num_mem} memory images")
-    for mi, memory in enumerate(memories):
-        print(
-            f"[{mi+1} / {num_mem}] {len(res_addrs[mi])} unit MMs on this memory"
-        )
-        result = run_sim_unit(
-            memory,
-            res_addrs[mi],
-            tile,
-        )
-        for ri, (b, i, j, k) in enumerate(res_ids[mi]):
-            for t1 in range(tile[0]):
-                for t2 in range(tile[1]):
-                    results[b, i, j, k, t1, t2] += result[ri, t1, t2]
+
+    with multiprocessing.Pool() as p:
+        mres = p.starmap(run_sim_unit, [(m, res_addrs[mi], tile) for (mi, m) in enumerate(memories)])
+        for mi, memory in enumerate(memories):
+            print(
+                f"[{mi+1} / {num_mem}] {len(res_addrs[mi])} unit MMs on this memory"
+            )
+            num_cycles += mres[mi][1]
+
+            for ri, (b, i, j, k) in enumerate(res_ids[mi]):
+                for t1 in range(tile[0]):
+                    for t2 in range(tile[1]):
+                        results[b, i, j, k, t1, t2] += mres[mi][0][ri, t1, t2]
     return results
 
 
@@ -451,7 +453,6 @@ class MemoryBuilder:
         self.data_x.append(x)
 
         self.result_id_1d.append(id)
-        print(id)
 
         return None
 
