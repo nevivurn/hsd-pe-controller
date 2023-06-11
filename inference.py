@@ -55,6 +55,7 @@ else:
 
 checkpoint += ".safetensors"
 
+use_multiprocessing = False
 
 use_convlowering = True
 use_tiling = True
@@ -303,9 +304,9 @@ def run_sim_unit(memory, res_addr, tile):
 
     result = np.zeros((len(res_addr), tile[0], tile[1]), dtype=np.int32)
 
+    local_num_cycles = 0
     def bench():
-        global num_cycles
-        local_num_cycles = 0
+        nonlocal local_num_cycles
         data = 0xCAFE0000
         while data != 0xCAFE0000 + len(res_addr):
             local_num_cycles += 1
@@ -321,8 +322,6 @@ def run_sim_unit(memory, res_addr, tile):
                         data -= 0x1_0000_0000
                     result[ri, i, j] = data
 
-        num_cycles += local_num_cycles
-
     # run simulator
     sim = Simulator(dut)
     sim.add_clock(1e-6)
@@ -331,7 +330,7 @@ def run_sim_unit(memory, res_addr, tile):
     print("running simulation...")
     sim.run()
     print("simulation completed")
-    return result, num_cycles
+    return result, local_num_cycles
 
 
 def run_sim(memories, res_addrs, res_ids, tile, results):
@@ -342,18 +341,32 @@ def run_sim(memories, res_addrs, res_ids, tile, results):
     num_mem = len(memories)
     print(f"{num_mem} memory images")
 
-    with multiprocessing.Pool() as p:
-        mres = p.starmap(run_sim_unit, [(m, res_addrs[mi], tile) for (mi, m) in enumerate(memories)])
+    if use_multiprocessing:
+        with multiprocessing.Pool() as p:
+            mres = p.starmap(run_sim_unit, [(m, res_addrs[mi], tile) for (mi, m) in enumerate(memories)])
+            for mi, memory in enumerate(memories):
+                print(
+                    f"[{mi+1} / {num_mem}] {len(res_addrs[mi])} unit MMs on this memory"
+                )
+                num_cycles += mres[mi][1]
+
+                for ri, (b, i, j, k) in enumerate(res_ids[mi]):
+                    for t1 in range(tile[0]):
+                        for t2 in range(tile[1]):
+                            results[b, i, j, k, t1, t2] += mres[mi][0][ri, t1, t2]
+    else:
         for mi, memory in enumerate(memories):
             print(
                 f"[{mi+1} / {num_mem}] {len(res_addrs[mi])} unit MMs on this memory"
             )
-            num_cycles += mres[mi][1]
+            result, local_num_cycles = run_sim_unit(memory, res_addrs[mi], tile)
+            num_cycles += local_num_cycles
 
             for ri, (b, i, j, k) in enumerate(res_ids[mi]):
                 for t1 in range(tile[0]):
                     for t2 in range(tile[1]):
-                        results[b, i, j, k, t1, t2] += mres[mi][0][ri, t1, t2]
+                        results[b, i, j, k, t1, t2] += result[ri, t1, t2]
+
     return results
 
 
