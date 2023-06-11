@@ -6,9 +6,24 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            python310
-            python310Packages.amaranth
-            python310Packages.numpy
+            (python310.withPackages (ps: with ps; [
+              amaranth
+              numpy
+              pytorch
+              pytorch-lightning
+              (safetensors.overrideAttrs (prev: rec {
+                version = "0.3.1";
+                src = pkgs.fetchFromGitHub {
+                  inherit (prev.src) owner repo;
+                  rev = "v${version}";
+                  hash = "sha256-RoIBD+zBKVzXE8OpI8GR371YPxceR4P8B9T1/AHc9vA=";
+                };
+                patches = [ ];
+                cargoDeps = prev.cargoDeps.overrideAttrs (_: { inherit patches; });
+              }))
+              torchmetrics
+              torchvision
+            ]))
             yosys
           ];
           packages = with pkgs; [ gtkwave ];
