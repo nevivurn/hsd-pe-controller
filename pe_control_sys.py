@@ -223,7 +223,15 @@ class PEControl(Elaboratable):
             setattr(m.submodules, f'row_ortree_{i}', self.row_ortree[i])
 
             m.d.comb += [
-                # TODO wires for local buffer A, B
+                self.lb_a[i].r_en.eq(self.lb_a_r_en),
+                self.lb_b[i].r_en.eq(self.lb_b_r_en),
+
+                self.lb_a[i].w_en.eq(self.lb_a_w_en & self.sys_sel_row[i]),
+                self.lb_b[i].w_en.eq(self.lb_b_w_en & self.sys_sel_col[i]),
+
+                self.lb_a[i].w_data.eq(self.in_r_data),
+                self.lb_b[i].w_data.eq(Mux(self.reuse_b, self.lb_b[i].r_data, self.in_r_data)),
+
                 self.out_ortree.in_arr[i].eq(self.row_ortree[i].out_d),
                 self.lb_b_rdy_ortree.in_arr[i].eq(self.lb_b[i].r_rdy),
             ]
@@ -231,7 +239,11 @@ class PEControl(Elaboratable):
                 setattr(m.submodules, f'pe_{i}_{j}', self.pe[i][j])
 
                 m.d.comb += [
-                    # TODO wires for each PE
+                    self.pe[i][j].in_rst.eq(self.in_rst),
+                    self.pe[i][j].in_a.eq(self.lb_a[i].r_data),
+                    self.pe[i][j].in_b.eq(self.lb_b[j].r_data),
+                    self.pe[i][j].in_init.eq(self.pe_init),
+
                     self.row_ortree[i].in_arr[j].eq(
                         Mux(self.sys_sel_row[i] & self.sys_sel_col[j],
                             self.pe[i][j].out_d,
@@ -259,19 +271,47 @@ class PEControl(Elaboratable):
 
         with m.FSM(reset='INIT'):
             with m.State('INIT'):
-                # TODO
-                pass
+                m.d.sync += [
+                    Cat(self.addr_io, self.addr_io_ovf).eq(0),
+                    Cat(self.magic_cnt, self.magic_cnt_ovf).eq(self.magic_init),
+                ]
+
+                with m.If(self.in_r_data == self.magic_init):
+                    Cat(self.next_pc, self.next_pc_ovf).eq(1)
+                    m.next = 'FETCH'
+
             with m.State('FETCH'):
-                # TODO
-                pass
+                m.d.sync += [
+                    Cat(self.addr_io, self.addr_io_ovf).eq(self.next_pc),
+                    self.out_w_en.eq(0),
+
+                    self.lb_a_w_en.eq(0),
+                    self.lb_b_w_en.eq(0),
+                    self.lb_a_r_en.eq(0),
+                    self.lb_b_r_en.eq(0),
+
+                    self.reuse_b.eq(0),
+                ]
+                with m.If(self.addr_io == self.next_pc):
+                    m.d.sync += Cat(self.next_pc, self.next_pc_ovf).eq(self.next_pc+1),
+                    m.next = 'DECODE'
+
             with m.State('DECODE'):
                 with m.Switch(self.opcode):
                     with m.Case(OPCODE.LOAD):
                         # OP     V1               V2
                         # 4b     4b               24b
                         # load   to[a|b]          from(gb_addr)
+                        m.d.sync += [
+                            Cat(self.addr_io, self.addr_io_ovf).eq(self.v2),
+                            self.sel_a.eq(~self.v1),
+                            self.sel_b.eq(self.v1),
+                            self.sys_sel_row.eq(1),
+                            self.sys_sel_col.eq(1),
+                            Cat(self.fan_cnt, self.fan_cnt_ovf).eq(0),
+                        ]
                         m.next = 'LOAD'
-                        # TODO
+
                     with m.Case(OPCODE.EXEC):
                         # OP     V1               V2
                         # 4b     4b               24b
@@ -287,15 +327,31 @@ class PEControl(Elaboratable):
                         # activation function code
                         # 0 for None
                         # 1 for ReLU
-
                         m.next = 'EXEC'
-                        # TODO
+                        m.d.sync += [
+                            Cat(self.fan_cnt, self.fan_cnt_ovf).eq(1),
+                            self.reuse_b.eq(self.v1[2]),
+                            self.pe_init.eq(self.fan_in),
+
+                            self.sys_sel_row.eq((1<<self.sys_size)-1),
+                            self.sys_sel_col.eq((1<<self.sys_size)-1),
+                        ]
+
                     with m.Case(OPCODE.STORE):
                         # OP     V1               V2
                         # 4b     4b               24b
                         # store                   to(gb_addr)
                         m.next = 'STORE'
-                        # TODO
+                        m.d.sync += [
+                            self.out_w_en.eq(1),
+                            Cat(self.addr_io, self.addr_io_ovf).eq(self.v2),
+
+                            Cat(self.magic_cnt, self.magic_cnt_ovf).eq(self.magic_cnt + 1),
+                            self.is_store.eq(1),
+
+                            self.sys_sel_row.eq(1),
+                            self.sys_sel_col.eq(1),
+                        ]
 
                     with m.Case(OPCODE.FLUSH):
                         m.next = 'FLUSH'
@@ -313,7 +369,12 @@ class PEControl(Elaboratable):
                         # fan_in == 1 --> scalar product
                         # sys_h == 0 and sys_w == 0 --> 1 by 1 PE control
                         m.next = 'FETCH'
-                        # TODO
+                        m.d.sync += [
+                            self.fan_in.eq(Mux(self.v2_f.any(), self.v2_f, self.fan_in)),
+                            self.sys_w.eq(self.v2_w),
+                            self.sys_h.eq(self.v2_h),
+                        ]
+
                     with m.Case():  # default
                         m.next = 'INIT'
 
@@ -325,11 +386,40 @@ class PEControl(Elaboratable):
                 # TO
                 # load to multiple buffers serially
                 ###################################################
-                # TODO
-                pass
+                m.d.sync += [
+                    Cat(self.addr_io, self.addr_io_ovf).eq(self.addr_io + 1),
+                    Cat(self.fan_cnt, self.fan_cnt_ovf).eq(self.fan_cnt_next),
+
+                    self.lb_a_w_en.eq(self.sel_a),
+                    self.lb_b_w_en.eq(self.sel_b),
+                ]
+                with m.If(self.fan_cnt == self.fan_in):
+                    m.d.sync += [
+                        self.sys_sel_row.eq(self.sys_sel_row.rotate_left(1)),
+                        self.sys_sel_col.eq(self.sys_sel_col.rotate_left(1)),
+                        Cat(self.fan_cnt, self.fan_cnt_ovf).eq(1),
+                    ]
+                    with m.If(Mux(self.sel_a, self.sys_sel_row == self.sys_h_sel, self.sys_sel_col == self.sys_w_sel)):
+                        m.next = 'FETCH'
+                        m.d.sync += [
+                            self.lb_a_w_en.eq(0),
+                            self.lb_b_w_en.eq(0),
+                        ]
+
             with m.State('EXEC'):
-                # TODO
-                pass
+                m.d.sync += [
+                    self.pe_init.eq(0),
+
+                    Cat(self.fan_cnt, self.fan_cnt_ovf).eq(self.fan_cnt_next),
+                    self.lb_b_w_en.eq(self.reuse_b),
+
+                    self.lb_a_r_en.eq(1),
+                    self.lb_b_r_en.eq(1),
+                ]
+
+                with m.If(self.fan_cnt == self.fan_in):
+                    m.next = 'FETCH'
+
             with m.State('STORE'):
                 ###################################################
                 # FROM
@@ -338,8 +428,22 @@ class PEControl(Elaboratable):
                 # TO
                 # store multiple results from sys_h by sys_w PEs
                 ###################################################
-                # TODO
-                pass
+                m.d.sync += [
+                    Cat(self.addr_io, self.addr_io_ovf).eq(self.addr_io + 1),
+                    self.sys_sel_col.eq(self.sys_sel_col.rotate_left(1)),
+                ]
+                with m.If(self.sys_sel_col == self.sys_w_sel):
+                    m.d.sync += [
+                        self.sys_sel_col.eq(1),
+                        self.sys_sel_row.eq(self.sys_sel_row.rotate_left(1)),
+                    ]
+                    with m.If(self.sys_sel_row == self.sys_h_sel):
+                        m.d.sync += [
+                            Cat(self.addr_io, self.addr_io_ovf).eq(0),
+                            self.is_store.eq(0),
+                        ]
+                        m.next = 'FETCH'
+
             with m.State('FLUSH'):
                 with m.If(~self.lb_b_rdy_any):  # all empty
                     m.next = 'FETCH'
