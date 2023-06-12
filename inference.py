@@ -6,9 +6,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_model
 import numpy as np
-import lightning as L
+try:
+    import lightning as L
+except ModuleNotFoundError:
+    import lightning_fabric as L
 from torchmetrics.classification import Accuracy
 
+import multiprocessing
+import sys
+sys.setrecursionlimit(10000)
 
 np.set_printoptions(precision=5)
 
@@ -49,6 +55,7 @@ else:
 
 checkpoint += ".safetensors"
 
+use_multiprocessing = False
 
 use_convlowering = True
 use_tiling = True
@@ -297,9 +304,9 @@ def run_sim_unit(memory, res_addr, tile):
 
     result = np.zeros((len(res_addr), tile[0], tile[1]), dtype=np.int32)
 
+    local_num_cycles = 0
     def bench():
-        global num_cycles
-        local_num_cycles = 0
+        nonlocal local_num_cycles
         data = 0xCAFE0000
         while data != 0xCAFE0000 + len(res_addr):
             local_num_cycles += 1
@@ -315,8 +322,6 @@ def run_sim_unit(memory, res_addr, tile):
                         data -= 0x1_0000_0000
                     result[ri, i, j] = data
 
-        num_cycles += local_num_cycles
-
     # run simulator
     sim = Simulator(dut)
     sim.add_clock(1e-6)
@@ -325,27 +330,43 @@ def run_sim_unit(memory, res_addr, tile):
     print("running simulation...")
     sim.run()
     print("simulation completed")
-    return result
+    return result, local_num_cycles
 
 
 def run_sim(memories, res_addrs, res_ids, tile, results):
+    global num_cycles
+
     assert len(memories) == len(res_addrs)
     assert len(res_addrs) == len(res_ids)
     num_mem = len(memories)
     print(f"{num_mem} memory images")
-    for mi, memory in enumerate(memories):
-        print(
-            f"[{mi+1} / {num_mem}] {len(res_addrs[mi])} unit MMs on this memory"
-        )
-        result = run_sim_unit(
-            memory,
-            res_addrs[mi],
-            tile,
-        )
-        for ri, (b, i, j, k) in enumerate(res_ids[mi]):
-            for t1 in range(tile[0]):
-                for t2 in range(tile[1]):
-                    results[b, i, j, k, t1, t2] += result[ri, t1, t2]
+
+    if use_multiprocessing:
+        with multiprocessing.Pool() as p:
+            mres = p.starmap(run_sim_unit, [(m, res_addrs[mi], tile) for (mi, m) in enumerate(memories)])
+            for mi, memory in enumerate(memories):
+                print(
+                    f"[{mi+1} / {num_mem}] {len(res_addrs[mi])} unit MMs on this memory"
+                )
+                num_cycles += mres[mi][1]
+
+                for ri, (b, i, j, k) in enumerate(res_ids[mi]):
+                    for t1 in range(tile[0]):
+                        for t2 in range(tile[1]):
+                            results[b, i, j, k, t1, t2] += mres[mi][0][ri, t1, t2]
+    else:
+        for mi, memory in enumerate(memories):
+            print(
+                f"[{mi+1} / {num_mem}] {len(res_addrs[mi])} unit MMs on this memory"
+            )
+            result, local_num_cycles = run_sim_unit(memory, res_addrs[mi], tile)
+            num_cycles += local_num_cycles
+
+            for ri, (b, i, j, k) in enumerate(res_ids[mi]):
+                for t1 in range(tile[0]):
+                    for t2 in range(tile[1]):
+                        results[b, i, j, k, t1, t2] += result[ri, t1, t2]
+
     return results
 
 
@@ -422,17 +443,27 @@ class MemoryBuilder:
                 # switch (sys_h, sys_w) order because of transpose
                 # hardware : x @ w.T
                 # here     : (w @ x.T).T
-                set_m = make_code()
+                set_m = make_code(OPCODE.SET_M, 0,
+                                  (self.sys_w << (self.cnt_bits + self.sys_size_bit)) |
+                                  (self.sys_h << self.cnt_bits) | fan_in)
                 self._append_code(set_m)
                 self.last_fan_in = fan_in
 
             # TODO FLUSH --> LOAD_W
+            self._append_code(make_code(OPCODE.FLUSH))
+            self._append_code(make_code(OPCODE.LOAD, LOAD_DEST.W))
+
             # NOTE LOAD_W requires address to be set.
             # Set specific address later at `get_mem`
             # TODO store data w (to be used at `get_mem`)
+            self.data_w.append(w)
 
         # TODO LOAD_A --> EXEC --> REUSE
         # TODO store data x (to be used at `get_mem`)
+        self._append_code(make_code(OPCODE.LOAD, LOAD_DEST.A))
+        self._append_code(make_code(OPCODE.EXEC, FIFO.REUSE << 2))
+        self._append_code(make_code(OPCODE.STORE))
+        self.data_x.append(x)
 
         self.result_id_1d.append(id)
 
@@ -481,8 +512,11 @@ class MemoryBuilder:
                 if dest == LOAD_DEST.W:
                     # TODO packing (int8 into int32, use `_packing`)
                     # TODO update `data_w_i`
+                    packed = self._packing(self.data_w[data_w_i], is_w=True)
+                    data_w_i += 1
 
                     # TODO update address of LOAD_W instruction
+                    mem[i] = make_code(OPCODE.LOAD, LOAD_DEST.W, len(mem))
 
                     # append data to memory
                     packed = packed.reshape(-1)
@@ -492,10 +526,14 @@ class MemoryBuilder:
                 elif dest == LOAD_DEST.A:
                     # TODO packing (int8 into int32)
                     # TODO update `data_x_i`
+                    packed = self._packing(self.data_x[data_x_i])
+                    data_x_i += 1
 
                     # TODO update address of LOAD_A instruction
+                    mem[i] = make_code(OPCODE.LOAD, LOAD_DEST.A, len(mem))
 
                     # TODO memo destination of STORE instruction
+                    result_addr_1d.append(len(mem))
 
                     # append data to memory
                     packed = packed.reshape(-1)
@@ -572,7 +610,19 @@ def compile_mm(
                         result_id_2d.append(result_id_1d)
 
                         # TODO reset mb
+                        mb = MemoryBuilder()
+                        last_fan_in = mb.append_instruction(
+                            x_tile,
+                            id=(b, i, j, k),
+                            w=w_tile,
+                            fan_in=fan_in,
+                        )  # x, id, w=None, fan_in=None
+
     # TODO handle trailing instructions
+    memory, result_addr_1d, result_id_1d = mb.get_mem()
+    memories.append(memory)
+    result_addr_2d.append(result_addr_1d)
+    result_id_2d.append(result_id_1d)
 
     return memories, result_addr_2d, result_id_2d
 
