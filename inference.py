@@ -78,9 +78,9 @@ max_fanin = 192  # maximum fan_in, in number of lines
 max_dotprod = max_fanin * (width // num_bits)  # maximum size of dot product
 assert max_fanin < l_depth
 # minimum data loaded + minimum code length
-# minimum code length = 8
-#   0xCAFE0000, SET_M, FLUSH, LOAD_A, LOAD_W, EXEC, STORE, 0xCAFECAFE
-assert max_fanin * ((sys_w + 1) + (sys_h + 1)) + 8 <= g_depth
+# minimum code length = 7
+#   0xCAFE0000, SET_M, LOAD_A, LOAD_W, EXEC, STORE, 0xCAFECAFE
+assert max_fanin * ((sys_w + 1) + (sys_h + 1)) + 7 <= g_depth
 tile_size = (sys_h + 1, sys_w + 1, max_dotprod)
 
 cnt_bits = int(round(np.log2(l_depth)))
@@ -417,7 +417,7 @@ class MemoryBuilder:
 
         if w is not None:
             len_data += w.reshape(-1).shape[0] // self.unit_k
-            len_code += 2  # FLUSH, LOAD_W
+            len_code += 1  # LOAD_W
             if fan_in != self.last_fan_in:
                 len_code += 1  # SET_M
         len_code += 3  # LOAD_X, EXEC, STORE
@@ -429,7 +429,7 @@ class MemoryBuilder:
         self.code.append(code & self.line_mask)
         return
 
-    def append_instruction(self, x, id, w=None, fan_in=None):
+    def append_instruction(self, x, id, w=None, last=False, fan_in=None):
         # w is None implies w is reused
         if not self._check_mem_space(x, w, fan_in):
             # Memory is full --> return context
@@ -449,8 +449,8 @@ class MemoryBuilder:
                 self._append_code(set_m)
                 self.last_fan_in = fan_in
 
-            # TODO FLUSH --> LOAD_W
-            self._append_code(make_code(OPCODE.FLUSH))
+            # TODO LOAD_W
+            #self._append_code(make_code(OPCODE.FLUSH))
             self._append_code(make_code(OPCODE.LOAD, LOAD_DEST.W))
 
             # NOTE LOAD_W requires address to be set.
@@ -461,7 +461,10 @@ class MemoryBuilder:
         # TODO LOAD_A --> EXEC --> REUSE
         # TODO store data x (to be used at `get_mem`)
         self._append_code(make_code(OPCODE.LOAD, LOAD_DEST.A))
-        self._append_code(make_code(OPCODE.EXEC, FIFO.REUSE << 2))
+        if last:
+            self._append_code(make_code(OPCODE.EXEC))
+        else:
+            self._append_code(make_code(OPCODE.EXEC, FIFO.REUSE << 2))
         self._append_code(make_code(OPCODE.STORE))
         self.data_x.append(x)
 
@@ -599,6 +602,7 @@ def compile_mm(
                         x_tile,
                         id=(b, i, j, k),
                         w=w_tile if j == 0 else None,
+                        last=j+1 == N//tile[1],
                         fan_in=fan_in,
                     )  # x, id, w=None, fan_in=None
                     # memory overflow
@@ -615,6 +619,7 @@ def compile_mm(
                             x_tile,
                             id=(b, i, j, k),
                             w=w_tile,
+                            last=j+1 == N//tile[1],
                             fan_in=fan_in,
                         )  # x, id, w=None, fan_in=None
 
@@ -892,6 +897,16 @@ if __name__ == "__main__":
     )
     acc = eval_custom(model, data_loader_test, accuracy_accum)
     print(f"{acc}")
+
+    print('config:',
+          f'batch_size: {batch_size}',
+          f'num_bits: {num_bits}',
+          f'g_depth: {g_depth}',
+          f'l_depth: {l_depth}',
+          f'sys_size_bit: {sys_size_bit}',
+          f'sys_h: {sys_h}',
+          f'sys_w: {sys_w}',
+          f'max_fanin: {max_fanin}')
 
     print(torch.__version__)
     print(L.__version__)

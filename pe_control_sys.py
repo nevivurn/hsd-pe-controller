@@ -110,7 +110,6 @@ class PEControl(Elaboratable):
         self.sys_size_bit = sys_size_bit
         self.sys_size = 2 ** sys_size_bit
         self.signed = signed
-        self.next_pc_bits = 8
 
         assert width in [32, 64, 128]
         # BRAM constraint of Virtex-6 devices
@@ -120,6 +119,7 @@ class PEControl(Elaboratable):
 
         self.gb_addr_width = int(round(math.log2(g_depth)))
         self.cnt_bits = int(round(math.log2(l_depth)))
+        self.next_pc_bits = self.gb_addr_width
 
         assert self.cnt_bits + 2 * sys_size_bit <= 24
         assert self.gb_addr_width >= self.next_pc_bits
