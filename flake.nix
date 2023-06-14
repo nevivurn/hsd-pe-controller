@@ -25,7 +25,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = [ pydeps pkgs.yosys ];
+          buildInputs = [ pydeps pkgs.yosys pkgs.parallel ];
           packages = with pkgs; [ gtkwave ];
         };
 
